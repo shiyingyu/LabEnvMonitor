@@ -3,6 +3,7 @@
 
 #include "EasyBuzzer.h"
 #include "Adafruit_SGP30.h"
+#include "MS5611.h"
 
 #include "SHT3x.h"
 
@@ -23,6 +24,9 @@
 
 SHT3x sensor(SHT3X_ADDRESS, SHT3x::Zero, TEMP_RST_TRIG_PIN);
 Adafruit_SGP30 sgp;
+MS5611 baro;
+
+int32_t pressure;
 
 /* return absolute humidity [mg/m^3] with approximation formula
 * @param temperature [°C]
@@ -87,8 +91,14 @@ void setup()
 {
 	Serial.begin(9600);
 	delay(500);
+
 	sensor.Begin();
 	delay(200);
+	
+	baro = MS5611();
+	baro.begin();
+	delay(200);
+
 	pinMode(ALARM_LED_PIN, OUTPUT);
 	// 报警灯自检
 	digitalWrite(ALARM_LED_PIN, HIGH);
@@ -201,4 +211,12 @@ void loop()
 		Serial.print(" & TVOC: 0x");
 		Serial.println(TVOC_base, HEX);
 	}
+	
+	pressure = baro.getPressure();
+	// Send pressure via serial (UART);
+	Serial.print("Pressure: ");
+	Serial.println(pressure);
+	Serial.print("Temperature: ");
+	Serial.println((float)(baro.getTemperature()) / 100);
+	Serial.println("-------------------------------------");
 }
