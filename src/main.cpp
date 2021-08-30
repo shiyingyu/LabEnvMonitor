@@ -47,6 +47,7 @@ uint32_t getAbsoluteHumidity(float temperature, float humidity)
  */
 bool alarm_state = false;
 bool already_in_beep = false;
+unsigned long lastExecute = 0;
 void alarm() {
 	if (!alarm_state) {
 		digitalWrite(ALARM_LED_PIN, LOW);
@@ -55,11 +56,25 @@ void alarm() {
 	else {
 		if (!already_in_beep) {
 			already_in_beep = true;
-			EasyBuzzer.beep(1500, 200, 500, 127, 1000, 0);
+			lastExecute = millis();
+			EasyBuzzer.singleBeep(1500, 200);
+			digitalWrite(ALARM_LED_PIN, HIGH);
+		}
+		else {
+			unsigned long current = millis();
+
+			if (current - lastExecute < 200) {
+				EasyBuzzer.update();
+			}
+			else if ((current - lastExecute > 200) && (current - lastExecute < 500)) {
+				EasyBuzzer.stopBeep();
+				digitalWrite(ALARM_LED_PIN, LOW);
+			}
+			else {
+				already_in_beep = false;
+			}
 		}
 	}
-	
-	EasyBuzzer.update();
 }
 
 void Scanner()
