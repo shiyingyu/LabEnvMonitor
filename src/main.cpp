@@ -20,9 +20,9 @@
 // pin指的都是GPIO的PIN编号，而不是管脚序号
 #define ALARM_LED_PIN 18
 #define ALARM_BUZZ_PIN 25
-#define TEMP_RST_TRIG_PIN 17
+#define TEMP_RST_TRIG_PIN 16
 
-SHT3x sensor(SHT3X_ADDRESS, SHT3x::Zero, TEMP_RST_TRIG_PIN);
+SHT3x sht(SHT3X_ADDRESS, SHT3x::Zero, TEMP_RST_TRIG_PIN);
 Adafruit_SGP30 sgp;
 MS5611 baro;
 
@@ -45,117 +45,158 @@ uint32_t getAbsoluteHumidity(float temperature, float humidity)
  * 
  * 如果当前是报警状态（根据alarm_state），就发出报警
  */
-bool alarm_state = false;
-bool already_in_beep = false;
-unsigned long lastExecute = 0;
-void alarm() {
-	if (!alarm_state) {
-		digitalWrite(ALARM_LED_PIN, LOW);
-		EasyBuzzer.stopBeep();
-	}
-	else {
-		if (!already_in_beep) {
-			already_in_beep = true;
-			lastExecute = millis();
-			EasyBuzzer.singleBeep(1500, 200);
-			digitalWrite(ALARM_LED_PIN, HIGH);
-		}
-		else {
-			unsigned long current = millis();
+void alarm(bool alert1, bool alert2, bool alert3) {
+	if (alert1 == true && alert2 == true && alert3 == true) return;
 
-			if (current - lastExecute < 200) {
+	// 二进制计算每组嘀的次数
+	int8_t alert_count = (alert1 ? 1 : 0) + (alert2 ? 2 : 0) + (alert3 ? 4 : 0);
+
+	EasyBuzzer.setPin(ALARM_BUZZ_PIN);
+	EasyBuzzer.setOnDuration(500);
+	EasyBuzzer.setOffDuration(200);
+	// 打开告警灯
+	for (uint8_t k = 0; k < 3; k ++) {
+		digitalWrite(19, alert1 ? HIGH : LOW);
+		digitalWrite(18, alert2 ? HIGH : LOW);
+		digitalWrite(17, alert3 ? HIGH : LOW);
+		for (int8_t i = 0; i < alert_count; i ++) {
+			EasyBuzzer.singleBeep(1000, 200);
+			for (int8_t j = 0; j < 10; j ++) {
 				EasyBuzzer.update();
+				delay(20);
 			}
-			else if ((current - lastExecute > 200) && (current - lastExecute < 500)) {
-				EasyBuzzer.stopBeep();
-				digitalWrite(ALARM_LED_PIN, LOW);
-			}
-			else {
-				already_in_beep = false;
-			}
+			EasyBuzzer.stopBeep();
+			delay(100);
 		}
+		digitalWrite(19, LOW);
+		digitalWrite(18, LOW);
+		digitalWrite(17, LOW);
+		delay(1000);
 	}
 }
 
-void Scanner()
-{
-	Serial.println();
-	Serial.println("I2C scanner. Scanning ...");
-	byte count = 0;
-
-	Wire.begin();
-	for (uint8_t i = 8; i <= 127; i++)
-	{
-		Wire.beginTransmission(i);		 // Begin I2C transmission Address (i)
-		if (Wire.endTransmission() == 0) // Receive 0 = success (ACK response)
-		{
-			Serial.print("Found address: ");
-			Serial.print(i, DEC);
-			Serial.print(" (0x");
-			Serial.print(i, HEX); // PCF8574 7 bit address
-			Serial.println(")");
-			count++;
-		}
+bool testI2CAddress(uint8_t address) {
+	Wire.beginTransmission(address);
+	if (Wire.endTransmission() == 0) {
+		return true;
 	}
-	Serial.print("Found ");
-	Serial.print(count, DEC); // numbers of devices
-	Serial.println(" device(s).");
+	return false;
+}
+/**
+ *  进行睡眠前的准备工作
+ * (1) 将相关pin置为INPUT，不再输出高电平（应该不需要该工作，因为会断电）
+ * (2) 将外围设备断电
+ */
+void sleep_prepare()
+{
+	digitalWrite(27, LOW);
+	digitalWrite(26, LOW);
 }
 
-void setup()
-{
-	Serial.begin(9600);
-	delay(500);
-
-	sensor.Begin();
-	delay(200);
-	
-	baro = MS5611();
-	baro.begin();
-	delay(200);
-
-	pinMode(ALARM_LED_PIN, OUTPUT);
-	// 报警灯自检
-	digitalWrite(ALARM_LED_PIN, HIGH);
-	delay(500);
-	digitalWrite(ALARM_LED_PIN, LOW);
+/**
+ * 在第一次上电的时候进行声光提示，并扫描所有可用I2C设备
+ * 
+ * 正常情况下，应该先发出短促的嘀声，并且3盏LED灯全亮一下，然后再每盏灯逐次亮起。如果第一次全亮的时候有灯没亮，则表示
+ * 这个灯坏了；如果第二次没有亮起，则表示对应的传感器设备没有响应。
+ * (1) SHT 0X44, (2) SGP30 0X58, (3) MS5611 0X77
+ */
+void powerOnIndicate() {
 	// 喇叭自检
 	EasyBuzzer.setPin(ALARM_BUZZ_PIN);
 	EasyBuzzer.setOnDuration(500);
 	EasyBuzzer.setOffDuration(200);
-	EasyBuzzer.singleBeep(1000, 200);
-	delay(200);
+	EasyBuzzer.singleBeep(1000, 500);
+	for (int i = 0; i < 10; i ++) {
+		EasyBuzzer.update();
+		delay(50);
+	}
 	EasyBuzzer.stopBeep();
 
-	// I2C设备扫描，输出到串口
-	Scanner();
+	// 报警灯自检
+	digitalWrite(17, HIGH);
+	digitalWrite(18, HIGH);
+	digitalWrite(19, HIGH);
+	delay(100);
+	digitalWrite(17, LOW);
+	digitalWrite(18, LOW);
+	digitalWrite(19, LOW);
+	delay(200);
 
-	// 使能SHT3X
-	pinMode(TEMP_RST_TRIG_PIN, OUTPUT);
-	digitalWrite(TEMP_RST_TRIG_PIN, LOW);
-
-	if (!sgp.begin())
-	{
-		Serial.println("Sensor not found :(");
-		while (1)
-			;
+	// I2C设备响应检查，每个响应了则对应点亮灯
+	Wire.begin();
+	// SHT3X
+	if (testI2CAddress(0x44)) {
+		digitalWrite(19, HIGH);
 	}
-	Serial.print("Found SGP30 serial #");
-	Serial.print(sgp.serialnumber[0], HEX);
-	Serial.print(sgp.serialnumber[1], HEX);
-	Serial.println(sgp.serialnumber[2], HEX);
+	else {
+		digitalWrite(19, LOW);
+	}
+	delay(200);
+	// SGP30
+	if (testI2CAddress(0x58)) {
+		digitalWrite(18, HIGH);
+	}
+	else {
+		digitalWrite(18, LOW);
+	}
+	delay(200);
+	
+	// MS5611
+	if (testI2CAddress(0x77)) {
+		digitalWrite(17, HIGH);
+	}
+	else {
+		digitalWrite(17, LOW);
+	}
+	delay(200);
+	delay(500);
+	digitalWrite(19, LOW);
+	digitalWrite(18, LOW);
+	digitalWrite(17, LOW);
+
+	// 告警模拟，正式产品中不要
+	//alarm(true, true, true);
+	//alarm(true, false, false);
 }
 
+/*
+Method to print the reason by which ESP32
+has been awaken from sleep
+*/
+void print_wakeup_reason(){
+  esp_sleep_wakeup_cause_t wakeup_reason;
+
+  wakeup_reason = esp_sleep_get_wakeup_cause();
+
+  switch(wakeup_reason)
+  {
+    case ESP_SLEEP_WAKEUP_EXT0 : Serial.println("Wakeup caused by external signal using RTC_IO"); break;
+    case ESP_SLEEP_WAKEUP_EXT1 : Serial.println("Wakeup caused by external signal using RTC_CNTL"); break;
+    case ESP_SLEEP_WAKEUP_TIMER : Serial.println("Wakeup caused by timer"); break;
+    case ESP_SLEEP_WAKEUP_TOUCHPAD : Serial.println("Wakeup caused by touchpad"); break;
+    case ESP_SLEEP_WAKEUP_ULP : Serial.println("Wakeup caused by ULP program"); break;
+    default : 
+		Serial.printf("Wakeup was not caused by deep sleep: %d\n",wakeup_reason);
+		break;
+  }
+  if (wakeup_reason == 0) {
+	powerOnIndicate();
+  }
+}
+
+
 int counter = 0;
-void loop()
+void getDataOnce()
 {
-	alarm();
-	sensor.UpdateData();
-	uint8_t r = sensor.GetError();
+	// 各个需要采集的数据
+	float temperature;
+
+	sht.UpdateData();
+	uint8_t r = sht.GetError();
 	if (r != 0)
 	{
 		printf("Error %d\n", r);
-		sensor.HardReset();
+		sht.HardReset();
 		for (int i = 0; i < r; i++)
 		{
 			digitalWrite(ALARM_LED_PIN, HIGH);
@@ -167,22 +208,14 @@ void loop()
 	else
 	{
 		Serial.print("Temperature: ");
-		float temperature = sensor.GetTemperature();
+		temperature = sht.GetTemperature();
 		Serial.print(temperature);
 		Serial.write("\xC2\xB0"); //The Degree symbol
 		Serial.println("C");
 		Serial.print("Humidity: ");
-		Serial.print(sensor.GetRelHumidity());
+		Serial.print(sht.GetRelHumidity());
 		Serial.println("%");
-		if (temperature >= 34) {
-			alarm_state = true;
-		}
-		else {
-			alarm_state = false;
-		}
 	}
-	delay(1000);
-	delay(500);
 
 	if (!sgp.IAQmeasure())
 	{
@@ -208,24 +241,16 @@ void loop()
 	Serial.print(sgp.rawEthanol);
 	Serial.println("");
 
-	delay(1000);
-
-	counter++;
-	if (counter == 30)
+	uint16_t TVOC_base, eCO2_base;
+	if (!sgp.getIAQBaseline(&eCO2_base, &TVOC_base))
 	{
-		counter = 0;
-
-		uint16_t TVOC_base, eCO2_base;
-		if (!sgp.getIAQBaseline(&eCO2_base, &TVOC_base))
-		{
-			Serial.println("Failed to get baseline readings");
-			return;
-		}
-		Serial.print("****Baseline values: eCO2: 0x");
-		Serial.print(eCO2_base, HEX);
-		Serial.print(" & TVOC: 0x");
-		Serial.println(TVOC_base, HEX);
+		Serial.println("Failed to get baseline readings");
+		return;
 	}
+	Serial.print("****Baseline values: eCO2: 0x");
+	Serial.print(eCO2_base, HEX);
+	Serial.print(" & TVOC: 0x");
+	Serial.println(TVOC_base, HEX);
 	
 	pressure = baro.getPressure();
 	// Send pressure via serial (UART);
@@ -234,4 +259,79 @@ void loop()
 	Serial.print("Temperature: ");
 	Serial.println((float)(baro.getTemperature()) / 100);
 	Serial.println("-------------------------------------");
+
+	// 阻塞式告警代码
+	bool alarm1 = false, alarm2 = false, alarm3 = false;
+	if (temperature >= 32) {
+		alarm1 = true;
+	}
+	else {
+		alarm1 = false;
+	}
+	if (alarm1 != false || alarm2 != false || alarm3 != false) {
+		alarm(alarm1, alarm2, alarm3);
+	}
 }
+
+const uint16_t SLEEP_SECONDS = 30;
+unsigned long startTime;
+void setup()
+{
+	startTime = millis();
+
+	// 将电源改为PWM模式
+	pinMode(27, OUTPUT);
+	digitalWrite(27, HIGH);
+	// 给外围电路供电
+	pinMode(26, OUTPUT);
+	digitalWrite(26, HIGH);
+
+	pinMode(ALARM_LED_PIN, OUTPUT);
+	pinMode(17, OUTPUT);
+	pinMode(19, OUTPUT);
+
+	// 使能SHT3X
+	pinMode(TEMP_RST_TRIG_PIN, OUTPUT);
+	digitalWrite(TEMP_RST_TRIG_PIN, LOW);
+
+	Serial.begin(9600);
+	while (!Serial) {}
+
+	// 等待一定的时间，让外围电路就位
+	delay(5);
+	print_wakeup_reason();
+	
+	// 设定下一次换醒（每30秒唤醒一次）
+  	esp_sleep_enable_timer_wakeup(SLEEP_SECONDS * 1000000);
+
+	sht.Begin();
+	
+	baro = MS5611();
+	baro.begin();
+
+
+	if (!sgp.begin())
+	{
+		Serial.println("sht not found :(");
+	}
+	else {
+		Serial.print("Found SGP30 serial #");
+		Serial.print(sgp.serialnumber[0], HEX);
+		Serial.print(sgp.serialnumber[1], HEX);
+		Serial.println(sgp.serialnumber[2], HEX);
+	}
+	getDataOnce();
+  	Serial.flush();
+	sleep_prepare();
+	unsigned long duration = millis() - startTime;
+	Serial.print("Executed in ");
+	Serial.print(duration);
+	Serial.println(" millseconds.");
+	Serial.print("Duty ratio is: ");
+	Serial.print((float)duration / (float)(SLEEP_SECONDS * 1000 / 100));
+	Serial.println("%");
+  	esp_deep_sleep_start();
+}
+
+// 这个函数不会被执行到。每次执行到setup函数结尾的时候就会进入睡眠
+void loop() {}
