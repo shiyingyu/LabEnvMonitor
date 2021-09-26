@@ -8,6 +8,8 @@
 #include "SHT3x.h"
 
 #define SHT3X_ADDRESS 0x44
+#define SGP30_ADDRESS 0x58
+#define MS5611_ADDRESS 0X77
 
 #define DEBUG
 
@@ -17,16 +19,28 @@
 #define CG_DEBUG_PRINT(x)
 #endif
 
-// pin指的都是GPIO的PIN编号，而不是管脚序号
-#define ALARM_LED_PIN 18
+// 3个告警灯和蜂鸣器的引脚
+#define ALARM_LED1_PIN 19
+#define ALARM_LED2_PIN 18
+#define ALARM_LED3_PIN 17
 #define ALARM_BUZZ_PIN 25
+
+// 使能SHT3X的IO引脚
 #define TEMP_RST_TRIG_PIN 16
+// SHT3X温度告警的引脚
+#define TEMP_ALARM_PIN 34
+
+// 电源管理的引脚
+// 外围设备供电使能引脚
+#define VDD33_EN_PIN 26
+// 电源芯片模式切换引脚（高电平为PWM模式，用于唤醒时；低电平用于休眠时)
+#define POWER_MODE_PIN 27
+// 电源状态输入引脚（应该配置为INPUT，不要配置为OUTPUT。高电平表示电压正常，低电平表示不正常）
+#define POWER_GOOD_PIN 37
 
 SHT3x sht(SHT3X_ADDRESS, SHT3x::Zero, TEMP_RST_TRIG_PIN);
 Adafruit_SGP30 sgp;
 MS5611 baro;
-
-int32_t pressure;
 
 /* return absolute humidity [mg/m^3] with approximation formula
 * @param temperature [°C]
@@ -41,43 +55,62 @@ uint32_t getAbsoluteHumidity(float temperature, float humidity)
 }
 
 /**
- * 以一定的频率发出声光报警
+ * 发出声光报警
+ * 
+ * 操控LED灯和蜂鸣器以相同的节奏闪烁和鸣叫，几声短促的为一组，组之间有较长时间间隔。每一组中的循环次数表示错误代码，共可支持从1~7共7种错误代码的提示
+ * CODE1（100）：温度报警;
+ * CODE2（010）：TVOC报警；
+ * CODE3（110）：湿度报警;
+ * CODE4（001）：气压报警；
+ * CODE5（101）：；
+ * CODE6（011）：；
+ * CODE7（111）：
  * 
  * 如果当前是报警状态（根据alarm_state），就发出报警
  */
-void alarm(bool alert1, bool alert2, bool alert3) {
-	if (alert1 == true && alert2 == true && alert3 == true) return;
+void alarm(bool alarm1, bool alarm2, bool alarm3)
+{
+	if (alarm1 == true && alarm2 == true && alarm3 == true)
+		return;
 
 	// 二进制计算每组嘀的次数
-	int8_t alert_count = (alert1 ? 1 : 0) + (alert2 ? 2 : 0) + (alert3 ? 4 : 0);
+	int8_t beep_count = (alarm1 ? 1 : 0) + (alarm2 ? 2 : 0) + (alarm3 ? 4 : 0);
 
 	EasyBuzzer.setPin(ALARM_BUZZ_PIN);
 	EasyBuzzer.setOnDuration(500);
 	EasyBuzzer.setOffDuration(200);
 	// 打开告警灯
-	for (uint8_t k = 0; k < 3; k ++) {
-		digitalWrite(19, alert1 ? HIGH : LOW);
-		digitalWrite(18, alert2 ? HIGH : LOW);
-		digitalWrite(17, alert3 ? HIGH : LOW);
-		for (int8_t i = 0; i < alert_count; i ++) {
+	for (uint8_t k = 0; k < 3; k++)
+	{
+		digitalWrite(ALARM_LED1_PIN, alarm1 ? HIGH : LOW);
+		digitalWrite(ALARM_LED2_PIN, alarm2 ? HIGH : LOW);
+		digitalWrite(ALARM_LED3_PIN, alarm3 ? HIGH : LOW);
+		for (int8_t i = 0; i < beep_count; i++)
+		{
 			EasyBuzzer.singleBeep(1000, 200);
-			for (int8_t j = 0; j < 10; j ++) {
+			for (int8_t j = 0; j < 10; j++)
+			{
 				EasyBuzzer.update();
 				delay(20);
 			}
 			EasyBuzzer.stopBeep();
 			delay(100);
 		}
-		digitalWrite(19, LOW);
-		digitalWrite(18, LOW);
-		digitalWrite(17, LOW);
+		digitalWrite(ALARM_LED1_PIN, LOW);
+		digitalWrite(ALARM_LED2_PIN, LOW);
+		digitalWrite(ALARM_LED3_PIN, LOW);
 		delay(1000);
 	}
 }
 
-bool testI2CAddress(uint8_t address) {
+/**
+ * 测试某个I2C地址是否有从设备响应，以便监测某个地址的设备是否正常
+ */
+bool testI2CAddress(uint8_t address)
+{
 	Wire.beginTransmission(address);
-	if (Wire.endTransmission() == 0) {
+	if (Wire.endTransmission() == 0)
+	{
 		return true;
 	}
 	return false;
@@ -87,10 +120,10 @@ bool testI2CAddress(uint8_t address) {
  * (1) 将相关pin置为INPUT，不再输出高电平（应该不需要该工作，因为会断电）
  * (2) 将外围设备断电
  */
-void sleep_prepare()
+void prepareToSleep()
 {
-	digitalWrite(27, LOW);
-	digitalWrite(26, LOW);
+	digitalWrite(POWER_MODE_PIN, LOW);
+	digitalWrite(VDD33_EN_PIN, LOW);
 }
 
 /**
@@ -98,179 +131,141 @@ void sleep_prepare()
  * 
  * 正常情况下，应该先发出短促的嘀声，并且3盏LED灯全亮一下，然后再每盏灯逐次亮起。如果第一次全亮的时候有灯没亮，则表示
  * 这个灯坏了；如果第二次没有亮起，则表示对应的传感器设备没有响应。
- * (1) SHT 0X44, (2) SGP30 0X58, (3) MS5611 0X77
+ * 
+ * 顺序为：(1) SHT 0X44, (2) SGP30 0X58, (3) MS5611 0X77
  */
-void powerOnIndicate() {
+void selfTest()
+{
 	// 喇叭自检
 	EasyBuzzer.setPin(ALARM_BUZZ_PIN);
 	EasyBuzzer.setOnDuration(500);
 	EasyBuzzer.setOffDuration(200);
-	EasyBuzzer.singleBeep(1000, 500);
-	for (int i = 0; i < 10; i ++) {
+	EasyBuzzer.singleBeep(1200, 500);
+	for (int i = 0; i < 10; i++)
+	{
 		EasyBuzzer.update();
 		delay(50);
 	}
 	EasyBuzzer.stopBeep();
 
-	// 报警灯自检
-	digitalWrite(17, HIGH);
-	digitalWrite(18, HIGH);
-	digitalWrite(19, HIGH);
+	// 报警灯自检，短暂闪烁0.1s
+	digitalWrite(ALARM_LED1_PIN, HIGH);
+	digitalWrite(ALARM_LED2_PIN, HIGH);
+	digitalWrite(ALARM_LED3_PIN, HIGH);
 	delay(100);
-	digitalWrite(17, LOW);
-	digitalWrite(18, LOW);
-	digitalWrite(19, LOW);
+	digitalWrite(ALARM_LED1_PIN, LOW);
+	digitalWrite(ALARM_LED2_PIN, LOW);
+	digitalWrite(ALARM_LED3_PIN, LOW);
 	delay(200);
 
 	// I2C设备响应检查，每个响应了则对应点亮灯
 	Wire.begin();
 	// SHT3X
-	if (testI2CAddress(0x44)) {
-		digitalWrite(19, HIGH);
-	}
-	else {
-		digitalWrite(19, LOW);
-	}
+	digitalWrite(ALARM_LED1_PIN, testI2CAddress(SHT3X_ADDRESS) ? HIGH : LOW);
 	delay(200);
-	// SGP30
-	if (testI2CAddress(0x58)) {
-		digitalWrite(18, HIGH);
-	}
-	else {
-		digitalWrite(18, LOW);
-	}
+	digitalWrite(ALARM_LED2_PIN, testI2CAddress(SGP30_ADDRESS) ? HIGH : LOW);
 	delay(200);
-	
-	// MS5611
-	if (testI2CAddress(0x77)) {
-		digitalWrite(17, HIGH);
-	}
-	else {
-		digitalWrite(17, LOW);
-	}
+	digitalWrite(ALARM_LED3_PIN, testI2CAddress(MS5611_ADDRESS) ? HIGH : LOW);
 	delay(200);
+
+	// 保持所有的监测状态一定时间再关掉灯，以便看清楚
 	delay(500);
-	digitalWrite(19, LOW);
-	digitalWrite(18, LOW);
-	digitalWrite(17, LOW);
+	digitalWrite(ALARM_LED1_PIN, LOW);
+	digitalWrite(ALARM_LED2_PIN, LOW);
+	digitalWrite(ALARM_LED3_PIN, LOW);
 
 	// 告警模拟，正式产品中不要
 	//alarm(true, true, true);
 	//alarm(true, false, false);
 }
 
-/*
-Method to print the reason by which ESP32
-has been awaken from sleep
-*/
-void print_wakeup_reason(){
-  esp_sleep_wakeup_cause_t wakeup_reason;
-
-  wakeup_reason = esp_sleep_get_wakeup_cause();
-
-  switch(wakeup_reason)
-  {
-    case ESP_SLEEP_WAKEUP_EXT0 : Serial.println("Wakeup caused by external signal using RTC_IO"); break;
-    case ESP_SLEEP_WAKEUP_EXT1 : Serial.println("Wakeup caused by external signal using RTC_CNTL"); break;
-    case ESP_SLEEP_WAKEUP_TIMER : Serial.println("Wakeup caused by timer"); break;
-    case ESP_SLEEP_WAKEUP_TOUCHPAD : Serial.println("Wakeup caused by touchpad"); break;
-    case ESP_SLEEP_WAKEUP_ULP : Serial.println("Wakeup caused by ULP program"); break;
-    default : 
-		Serial.printf("Wakeup was not caused by deep sleep: %d\n",wakeup_reason);
-		break;
-  }
-  if (wakeup_reason == 0) {
-	powerOnIndicate();
-  }
-}
-
-
-int counter = 0;
+/**
+ * 进行一次采集数据的业务工作
+ */
 void getDataOnce()
 {
 	// 各个需要采集的数据
-	float temperature;
+	float temperature, humidity;
+	uint16_t TVOC, eCO2, eCO2_base, TVOC_base, rawH2, rawEthanol;
+	int32_t pressure;
+	float ms5611Temperature;
 
 	sht.UpdateData();
 	uint8_t r = sht.GetError();
-	if (r != 0)
+	if (r == 0)
 	{
-		printf("Error %d\n", r);
-		sht.HardReset();
-		for (int i = 0; i < r; i++)
-		{
-			digitalWrite(ALARM_LED_PIN, HIGH);
-			delay(50);
-			digitalWrite(ALARM_LED_PIN, LOW);
-			delay(50);
-		}
-	}
-	else
-	{
-		Serial.print("Temperature: ");
 		temperature = sht.GetTemperature();
-		Serial.print(temperature);
-		Serial.write("\xC2\xB0"); //The Degree symbol
-		Serial.println("C");
-		Serial.print("Humidity: ");
-		Serial.print(sht.GetRelHumidity());
-		Serial.println("%");
+		humidity = sht.GetRelHumidity();
 	}
 
-	if (!sgp.IAQmeasure())
+	if (sgp.IAQmeasure())
 	{
-		Serial.println("Measurement failed");
-		return;
+		TVOC = sgp.TVOC;
+		eCO2 = sgp.eCO2;
 	}
-	Serial.print("TVOC ");
-	Serial.print(sgp.TVOC);
-	Serial.print(" ppb\t");
-	Serial.print("eCO2 ");
-	Serial.print(sgp.eCO2);
-	Serial.println(" ppm");
 
-	if (!sgp.IAQmeasureRaw())
+	if (sgp.IAQmeasureRaw())
 	{
-		Serial.println("Raw Measurement failed");
-		return;
+		rawH2 = sgp.rawH2;
+		rawEthanol = sgp.rawEthanol;
 	}
-	Serial.print("Raw H2 ");
-	Serial.print(sgp.rawH2);
-	Serial.print(" \t");
-	Serial.print("Raw Ethanol ");
-	Serial.print(sgp.rawEthanol);
-	Serial.println("");
 
-	uint16_t TVOC_base, eCO2_base;
 	if (!sgp.getIAQBaseline(&eCO2_base, &TVOC_base))
 	{
 		Serial.println("Failed to get baseline readings");
-		return;
 	}
+
+	pressure = baro.getPressure();
+	ms5611Temperature = (float)(baro.getTemperature()) / 100;
+
+	// 阻塞式告警代码
+	bool alarm1 = false, alarm2 = false, alarm3 = false;
+	if (temperature >= 32)
+	{
+		alarm1 = true;
+	}
+	else
+	{
+		alarm1 = false;
+	}
+	if (alarm1 != false || alarm2 != false || alarm3 != false)
+	{
+		alarm(alarm1, alarm2, alarm3);
+	}
+#ifdef DEBUG
+	// SHT3X
+	Serial.print("Temperature: ");
+	Serial.print(temperature);
+	Serial.write("\xC2\xB0"); //The Degree symbol
+	Serial.println("C");
+	Serial.print("Humidity: ");
+	Serial.print(humidity);
+	Serial.println("%");
+
+	// SGP30
+	Serial.print("TVOC ");
+	Serial.print(TVOC);
+	Serial.print(" ppb\t");
+	Serial.print("eCO2 ");
+	Serial.print(eCO2);
+	Serial.println(" ppm");
+	Serial.print("Raw H2 ");
+	Serial.print(rawH2);
+	Serial.print(" \t");
+	Serial.print("Raw Ethanol ");
+	Serial.print(rawEthanol);
+	Serial.println("");
 	Serial.print("****Baseline values: eCO2: 0x");
 	Serial.print(eCO2_base, HEX);
 	Serial.print(" & TVOC: 0x");
 	Serial.println(TVOC_base, HEX);
-	
-	pressure = baro.getPressure();
-	// Send pressure via serial (UART);
+
+	// MS5611
 	Serial.print("Pressure: ");
 	Serial.println(pressure);
 	Serial.print("Temperature: ");
-	Serial.println((float)(baro.getTemperature()) / 100);
-	Serial.println("-------------------------------------");
-
-	// 阻塞式告警代码
-	bool alarm1 = false, alarm2 = false, alarm3 = false;
-	if (temperature >= 32) {
-		alarm1 = true;
-	}
-	else {
-		alarm1 = false;
-	}
-	if (alarm1 != false || alarm2 != false || alarm3 != false) {
-		alarm(alarm1, alarm2, alarm3);
-	}
+	Serial.println(ms5611Temperature);
+#endif
 }
 
 const uint16_t SLEEP_SECONDS = 30;
@@ -280,49 +275,57 @@ void setup()
 	startTime = millis();
 
 	// 将电源改为PWM模式
-	pinMode(27, OUTPUT);
-	digitalWrite(27, HIGH);
+	pinMode(POWER_MODE_PIN, OUTPUT);
+	digitalWrite(POWER_MODE_PIN, HIGH);
 	// 给外围电路供电
-	pinMode(26, OUTPUT);
-	digitalWrite(26, HIGH);
+	pinMode(VDD33_EN_PIN, OUTPUT);
+	digitalWrite(VDD33_EN_PIN, HIGH);
+	// 等待一定的时间，让外围电路就位
+	delay(5);
 
-	pinMode(ALARM_LED_PIN, OUTPUT);
-	pinMode(17, OUTPUT);
-	pinMode(19, OUTPUT);
+	// 初始化引脚
+	pinMode(ALARM_LED1_PIN, OUTPUT);
+	pinMode(ALARM_LED2_PIN, OUTPUT);
+	pinMode(ALARM_LED3_PIN, OUTPUT);
 
 	// 使能SHT3X
 	pinMode(TEMP_RST_TRIG_PIN, OUTPUT);
 	digitalWrite(TEMP_RST_TRIG_PIN, LOW);
 
 	Serial.begin(9600);
-	while (!Serial) {}
+	while (!Serial)
+	{
+	}
 
-	// 等待一定的时间，让外围电路就位
-	delay(5);
-	print_wakeup_reason();
-	
-	// 设定下一次换醒（每30秒唤醒一次）
-  	esp_sleep_enable_timer_wakeup(SLEEP_SECONDS * 1000000);
+	// 如果是第一次上电则开机自检
+	if (esp_sleep_get_wakeup_cause() == 0)
+	{
+		selfTest();
+	}
+
+	// 设定下一次换醒（单位微秒，1S = 10^6μS
+	esp_sleep_enable_timer_wakeup(SLEEP_SECONDS * 1000000);
 
 	sht.Begin();
-	
 	baro = MS5611();
 	baro.begin();
 
-
 	if (!sgp.begin())
 	{
-		Serial.println("sht not found :(");
+		Serial.println("SGP30 not found");
 	}
-	else {
+	else
+	{
 		Serial.print("Found SGP30 serial #");
 		Serial.print(sgp.serialnumber[0], HEX);
 		Serial.print(sgp.serialnumber[1], HEX);
 		Serial.println(sgp.serialnumber[2], HEX);
 	}
 	getDataOnce();
-  	Serial.flush();
-	sleep_prepare();
+	Serial.flush();
+	prepareToSleep();
+
+	// 计算执行时间和占空比，用于评估电池寿命（假定工作电流和休眠电流已知，通过累计使用电量，即可知道电池剩余电量）
 	unsigned long duration = millis() - startTime;
 	Serial.print("Executed in ");
 	Serial.print(duration);
@@ -330,7 +333,9 @@ void setup()
 	Serial.print("Duty ratio is: ");
 	Serial.print((float)duration / (float)(SLEEP_SECONDS * 1000 / 100));
 	Serial.println("%");
-  	esp_deep_sleep_start();
+
+	// 进入睡眠，需要改为休眠模式（hibernation）
+	esp_deep_sleep_start();
 }
 
 // 这个函数不会被执行到。每次执行到setup函数结尾的时候就会进入睡眠
