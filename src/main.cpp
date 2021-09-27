@@ -1,4 +1,10 @@
 #include <Arduino.h>
+#include "esp_bt.h"
+#include "esp_gap_ble_api.h"
+#include "esp_gatts_api.h"
+#include "esp_bt_defs.h"
+#include "esp_bt_main.h"
+#include "esp_wifi.h"
 #include <Wire.h>
 
 #include "EasyBuzzer.h"
@@ -11,13 +17,11 @@
 #define SGP30_ADDRESS 0x58
 #define MS5611_ADDRESS 0X77
 
-#define DEBUG
+// 作业之间的休眠间隔。这个时间应该在满足业务要求的前提下越长越好
+const uint16_t SLEEP_SECONDS = 30;
 
-#ifdef DEBUG
-#define CG_DEBUG_PRINT(x) Serial.println(x)
-#else
-#define CG_DEBUG_PRINT(x)
-#endif
+// 正式产品中应该注释掉本句，利用条件编译的机制去掉调试代码
+#define DEBUG
 
 // 3个告警灯和蜂鸣器的引脚
 #define ALARM_LED1_PIN 19
@@ -124,6 +128,20 @@ void prepareToSleep()
 {
 	digitalWrite(POWER_MODE_PIN, LOW);
 	digitalWrite(VDD33_EN_PIN, LOW);
+
+	// 关闭MCU的无线功能（官方要求步骤）
+	esp_bluedroid_disable();
+	esp_bt_controller_disable();
+	esp_wifi_stop();
+
+	// 在深睡前配置好睡眠时进一步关闭RTC中的一些电源域，以达到“休眠”状态
+	// 休眠状态，MCU电流<2uA
+	// RTC慢速内存
+	esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_SLOW_MEM, ESP_PD_OPTION_OFF);
+	// RTC快速内存
+	esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_FAST_MEM, ESP_PD_OPTION_OFF);
+	// RTC的协处理器、传感器和IO引脚
+	esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_OFF);
 }
 
 /**
@@ -234,45 +252,52 @@ void getDataOnce()
 	}
 #ifdef DEBUG
 	// SHT3X
+	Serial.println("SHT3X:");
 	Serial.print("Temperature: ");
 	Serial.print(temperature);
 	Serial.write("\xC2\xB0"); //The Degree symbol
-	Serial.println("C");
-	Serial.print("Humidity: ");
+	Serial.print("C");
+	Serial.print("\tHumidity: ");
 	Serial.print(humidity);
 	Serial.println("%");
+	Serial.println("");
 
 	// SGP30
-	Serial.print("TVOC ");
+	Serial.println("SGP30:");
+	Serial.print("TVOC: ");
 	Serial.print(TVOC);
-	Serial.print(" ppb\t");
-	Serial.print("eCO2 ");
+	Serial.print(" ppb\t eCO2: ");
 	Serial.print(eCO2);
-	Serial.println(" ppm");
-	Serial.print("Raw H2 ");
+	Serial.print(" ppm\tRaw H2: ");
 	Serial.print(rawH2);
-	Serial.print(" \t");
-	Serial.print("Raw Ethanol ");
+	Serial.print(" \tRaw Ethanol: ");
 	Serial.print(rawEthanol);
 	Serial.println("");
 	Serial.print("****Baseline values: eCO2: 0x");
 	Serial.print(eCO2_base, HEX);
 	Serial.print(" & TVOC: 0x");
 	Serial.println(TVOC_base, HEX);
+	Serial.println("");
 
 	// MS5611
+	Serial.println("MS5611:");
 	Serial.print("Pressure: ");
-	Serial.println(pressure);
-	Serial.print("Temperature: ");
+	Serial.print(pressure);
+	Serial.print("\tTemperature: ");
 	Serial.println(ms5611Temperature);
+	Serial.println("");
 #endif
 }
 
-const uint16_t SLEEP_SECONDS = 30;
-unsigned long startTime;
 void setup()
 {
+	unsigned long startTime;
 	startTime = millis();
+
+	// 只有需要上报数据的时候再根据需要酌情打开蓝牙或WIFI。用不到的就一直保持关闭状态
+	esp_bluedroid_disable();
+	esp_bt_controller_disable();
+	esp_wifi_stop();
 
 	// 将电源改为PWM模式
 	pinMode(POWER_MODE_PIN, OUTPUT);
@@ -316,25 +341,32 @@ void setup()
 	}
 	else
 	{
+#ifdef DEBUG
 		Serial.print("Found SGP30 serial #");
 		Serial.print(sgp.serialnumber[0], HEX);
 		Serial.print(sgp.serialnumber[1], HEX);
 		Serial.println(sgp.serialnumber[2], HEX);
+#endif
 	}
 	getDataOnce();
-	Serial.flush();
-	prepareToSleep();
 
 	// 计算执行时间和占空比，用于评估电池寿命（假定工作电流和休眠电流已知，通过累计使用电量，即可知道电池剩余电量）
 	unsigned long duration = millis() - startTime;
+	float dutyRate = (float)duration / (float)(SLEEP_SECONDS * 1000 / 100);
+#ifdef DEBUG
+	Serial.println("DUTY RATION:");
 	Serial.print("Executed in ");
 	Serial.print(duration);
-	Serial.println(" millseconds.");
-	Serial.print("Duty ratio is: ");
-	Serial.print((float)duration / (float)(SLEEP_SECONDS * 1000 / 100));
+	Serial.println(" millseconds, and duty ratio is: ");
+	Serial.print(dutyRate);
 	Serial.println("%");
+	Serial.println("----------------------------------------------------------------");
+
+	Serial.flush();
+#endif
 
 	// 进入睡眠，需要改为休眠模式（hibernation）
+	prepareToSleep();
 	esp_deep_sleep_start();
 }
 
