@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <Wire.h>
+#include "wifi.h"
 
 #include "EasyBuzzer.h"
 #include "Adafruit_SGP30.h"
@@ -178,7 +179,32 @@ void selfTest()
 	//alarm(true, true, true);
 	//alarm(true, false, false);
 }
-
+void getFastConfig(String ssid)
+{
+	String BSSID;
+	uint32_t _fastConnectChannel = 0;
+	int networksFound = WiFi.scanNetworks();
+	int i;
+	uint8_t ret = 0;
+	int32_t scan_rssi = -200;
+	for (i = 0; i < networksFound; i++)
+	{
+		if (ssid == WiFi.SSID(i))
+		{
+			if (WiFi.RSSI(i) > scan_rssi)
+			{
+				_fastConnectChannel = WiFi.channel(i);
+				BSSID = WiFi.BSSIDstr(i);
+				scan_rssi = WiFi.RSSI(i);
+				ret = 1;
+			}
+		}
+	}
+	Serial.print("CHANNEL: ");
+	Serial.println(_fastConnectChannel);
+	Serial.print("BSSID: ");
+	Serial.println(BSSID);
+}
 /**
  * 进行一次采集数据的业务工作
  */
@@ -305,6 +331,30 @@ void setup()
 
 	// 设定下一次换醒（单位微秒，1S = 10^6μS
 	esp_sleep_enable_timer_wakeup(SLEEP_SECONDS * 1000000);
+
+	unsigned long wifiStartTime = millis();
+	//getFastConfig("home426"); //13, A8:5E:45:EA:34:D0
+	WiFi.persistent(true);
+	WiFi.mode(WIFI_STA);
+	byte bssid[6];
+	bssid[0] = 0xa8;
+	bssid[1] = 0x5e;
+	bssid[2] = 0x45;
+	bssid[3] = 0xea;
+	bssid[4] = 0x34;
+	bssid[5] = 0xd0;
+	WiFi.begin("home426", "SpeedSpeed", 13, &bssid[0]);
+	while (WiFi.status() != WL_CONNECTED)
+	{
+		delay(20);
+		Serial.println("Establishing connection to WiFi..");
+	}
+	unsigned long wifiDuration = millis() - wifiStartTime;
+	Serial.println("Connecting to WIFI used ");
+	Serial.print(wifiDuration);
+	Serial.println(" millseconds.");
+
+	Serial.println(WiFi.localIP());
 
 	sht.Begin();
 	baro = MS5611();
