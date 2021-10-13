@@ -127,9 +127,6 @@ bool testI2CAddress(uint8_t address)
  */
 void prepareToSleep()
 {
-	digitalWrite(POWER_MODE_PIN, LOW);
-	digitalWrite(VDD33_EN_PIN, LOW);
-
 	// 关闭MCU的无线功能（官方要求步骤）
 	esp_bluedroid_disable();
 	esp_bt_controller_disable();
@@ -143,6 +140,9 @@ void prepareToSleep()
 	esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_FAST_MEM, ESP_PD_OPTION_OFF);
 	// RTC的协处理器、传感器和IO引脚
 	esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_OFF);
+	
+	digitalWrite(VDD33_EN_PIN, LOW);
+	digitalWrite(POWER_MODE_PIN, LOW);
 }
 
 /**
@@ -416,8 +416,11 @@ void setup()
 #endif
 
 	// 进入睡眠，需要改为休眠模式（hibernation）
+	Serial.println("Preparing to sleep.");
 	prepareToSleep();
+	Serial.println("ready to sleep");
 	esp_deep_sleep_start();
+	Serial.println("slept");
 }
 
 // 这个函数不会被执行到。每次执行到setup函数结尾的时候就会进入睡眠
