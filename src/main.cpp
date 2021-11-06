@@ -357,30 +357,6 @@ void setup()
 	// 设定下一次换醒（单位微秒，1S = 10^6μS
 	esp_sleep_enable_timer_wakeup(SLEEP_SECONDS * 1000000);
 
-	unsigned long wifiStartTime = millis();
-	//getFastConfig("home426"); //13, A8:5E:45:EA:34:D0
-	WiFi.persistent(true);
-	WiFi.mode(WIFI_STA);
-	byte bssid[6];
-	bssid[0] = 0xa8;
-	bssid[1] = 0x5e;
-	bssid[2] = 0x45;
-	bssid[3] = 0xea;
-	bssid[4] = 0x34;
-	bssid[5] = 0xd0;
-	WiFi.begin("home426", "SpeedSpeed", 13, &bssid[0]);
-	while (WiFi.status() != WL_CONNECTED)
-	{
-		delay(20);
-		Serial.println("Establishing connection to WiFi..");
-	}
-	unsigned long wifiDuration = millis() - wifiStartTime;
-	Serial.println("Connecting to WIFI used ");
-	Serial.print(wifiDuration);
-	Serial.println(" millseconds.");
-
-	Serial.println(WiFi.localIP());
-
 	sht.Begin();
 	baro = MS5611();
 	baro.begin();
@@ -399,6 +375,31 @@ void setup()
 #endif
 	}
 	getDataOnce();
+	// 连接WIFI需要大电流，关闭外围电路
+	digitalWrite(VDD33_EN_PIN, LOW);
+	unsigned long wifiStartTime = millis();
+	//getFastConfig("home426"); //13, A8:5E:45:EA:34:D0
+	WiFi.persistent(true);
+	WiFi.mode(WIFI_STA);
+	byte bssid[6];
+	bssid[0] = 0xa8;
+	bssid[1] = 0x5e;
+	bssid[2] = 0x45;
+	bssid[3] = 0xea;
+	bssid[4] = 0x34;
+	bssid[5] = 0xd0;
+	WiFi.begin("rabbitoose", "SpeedSpeed", 13, &bssid[0]);
+	while (WiFi.status() != WL_CONNECTED)
+	{
+		delay(20);
+		Serial.println("Establishing connection to WiFi..");
+	}
+	unsigned long wifiDuration = millis() - wifiStartTime;
+	Serial.println("Connecting to WIFI used ");
+	Serial.print(wifiDuration);
+	Serial.println(" millseconds.");
+
+	Serial.println(WiFi.localIP());
 
 	// 计算执行时间和占空比，用于评估电池寿命（假定工作电流和休眠电流已知，通过累计使用电量，即可知道电池剩余电量）
 	unsigned long duration = millis() - startTime;
